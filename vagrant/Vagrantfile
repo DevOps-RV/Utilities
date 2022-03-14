@@ -1,0 +1,60 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# Maintainer: Raghu Vamsi <devops.rv@outlook.com>
+
+jenkins_private_ip = "192.168.56.20" #jenkins IP
+jenkins_guest_port = "8080" #Jenkins Port
+id_rsa_pub = File.read(".ssh/vagrant.pub")
+box = "centos/8"
+N = 3 #number of nodes
+
+#centos8 yum repo bug
+$common_script = <<-SCRIPT
+sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config;
+sudo sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* ; \
+  sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
+sudo dnf distro-sync; sudo systemctl restart sshd
+sudo yum -y clean all; sudo rm -rf /var/cache/yum
+SCRIPT
+
+#install jenkins and ansible
+$jenkins_script = <<-SCRIPT
+sudo yum install -y wget epel-release java-11-openjdk
+sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+sudo rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key
+sudo yum install -y jenkins ansible
+sudo systemctl daemon-reload; sudo systemctl enable jenkins
+sudo systemctl start jenkins; sudo systemctl status jenkins
+ansible --version; ansible all --list-hosts
+PASS=$(sudo cat /var/lib/jenkins/secrets/initialAdminPassword)
+echo "-------------------------------------------------------"
+echo "--------------- CONFIGURE JENKINS ---------------------"
+echo "go to http://localhost:$1 or http://$2:$1 and"
+echo "Configure Jenkins using initialAdminPassword: $PASS"
+echo "-------------------------------------------------------"
+SCRIPT
+
+Vagrant.configure("2") do |config|
+    config.vm.box = box
+    config.vm.provision "shell", inline: $common_script
+    config.vm.provision "file", source: ".ssh/vagrant.pub", destination: "~/.ssh/authorized_keys"
+
+    (1..N).each do |i|
+    config.vm.define "node#{i}" do |node|
+        node.vm.hostname = "node#{i}"
+        node.vm.network "private_network", ip: "192.168.56.2#{i}"
+    end
+end
+
+    config.vm.define "jenkins" do |jenkins|
+        jenkins.vm.hostname = "jenkins"
+        jenkins.vm.network "private_network", ip: jenkins_private_ip
+        jenkins.vm.network "forwarded_port", guest: jenkins_guest_port, host: 8080
+        jenkins.vm.network "forwarded_port", guest: 50000, host: 50000
+        jenkins.vm.provision "file", source: ".ssh/vagrant.pub", destination: "~/.ssh/id_rsa.pub"
+        jenkins.vm.provision "file", source: ".ssh/vagrant", destination: "~/.ssh/id_rsa"
+        jenkins.vm.provision "file", source: "../ansible/", destination: "$HOME"
+        jenkins.vm.provision "shell", inline: 'N=$1; X=1; while [ $X -le $N ]; do echo "node${X} ansible_host=192.168.56.2${X}" >> inventory; X=$(( $X + 1 )); done; chown vagrant:vagrant inventory', args: "#{N}"
+        jenkins.vm.provision "shell", inline: $jenkins_script, args: "#{jenkins_guest_port} #{jenkins_private_ip}"
+    end
+end
